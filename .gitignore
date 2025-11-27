@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# DoctoSync config file
+config/config.yaml
+config/cookies.txt
+config/credentials.json
+config/token.json

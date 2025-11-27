@@ -1,0 +1,25 @@
+api:
+  # L'URL de base pour la récupération des rendez-vous
+  url: "https://pro.doctolib.fr/calendar_display/appointments" 
+  # Chemin vers le fichier de cookies (format Netscape ou Single-Line)
+  cookie_path: "config/cookies.txt"
+  # Format de date requis pour les requêtes API
+  date_format: "%Y-%m-%d %H:%M:%S" 
+  # ID(s) de votre agenda Doctolib (peut être une liste d'IDs séparés par des virgules si l'API le permet)
+  agenda_ids: "1234567" 
+  # User-Agent pour simuler un navigateur réel
+  user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0"
+
+calendar:
+  # Identifiant de l'agenda Google cible (votre email ou l'ID de l'agenda partagé)
+  id: "votreadresse@group.calendar.google.com"
+  # Chemin vers les identifiants téléchargés depuis la Google Cloud Console
+  credentials_path: "config/credentials.json"
+
+config:
+  # Rappel par défaut pour tous les RDV (en minutes avant l'heure de début)
+  notification: 30 
+  # Rappel spécifique pour le tout premier RDV de la journée (0 = utilise le rappel par défaut)
+  first_of_day: 60 
+  # Localisation fixe à ajouter au champ "location" de Google Calendar
+  localisation: "123 Avenue de la Santé, 75001 Paris"
