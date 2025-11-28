@@ -22,6 +22,12 @@ from googleapiclient.errors import HttpError
 
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
+# Couleurs ANSI pour le terminal
+ANSI_GREEN = '\033[92m'
+ANSI_BLUE = '\033[94m'
+ANSI_RED = '\033[91m'
+ANSI_RESET = '\033[0m'
+
 def load_yaml(path):
     """Charge la configuration."""
     try:
@@ -146,6 +152,14 @@ def _create_event_body(rdv, key, notif_config, loc):
 
     return body, day
 
+def _print_sync_stats(week_date, total_rdvs, stats, delete_count):
+    """Affiche le résumé de la synchronisation avec couleurs."""
+    s_add = f"{ANSI_GREEN}+{stats['add']} créés{ANSI_RESET}" if stats['add'] > 0 else f"+{stats['add']} créés"
+    s_upd = f"{ANSI_BLUE}~{stats['upd']} maj{ANSI_RESET}" if stats['upd'] > 0 else f"~{stats['upd']} maj"
+    s_del = f"{ANSI_RED}-{delete_count} supprimés{ANSI_RESET}" if delete_count > 0 else f"-{delete_count} supprimés"
+
+    print(f"Semaine du {week_date} : {total_rdvs} RDVs | {s_add} / {s_upd} / {s_del}")
+
 def sync_week(service, config, rdvs, existing_map, week_date):
     """Logique principale de synchronisation (Création, MAJ, Suppression)."""
     # Extraction groupée de la config pour réduire les variables locales (Fix R0914)
@@ -181,7 +195,7 @@ def sync_week(service, config, rdvs, existing_map, week_date):
     for k in to_delete:
         service.events().delete(calendarId=config['calendar']['id'], eventId=existing_map[k]['id']).execute()
 
-    print(f"Semaine du {week_date} : {len(rdvs)} RDVs | +{stats['add']} créés / ~{stats['upd']} maj / -{len(to_delete)} supprimés")
+    _print_sync_stats(week_date, len(rdvs), stats, len(to_delete))
 
 def main():
     """Fonction principale du script."""
