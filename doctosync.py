@@ -60,7 +60,8 @@ def get_cookies(path):
 def get_calendar_service(config):
     """Authentification Google OAuth2."""
     creds = None
-    token_path = 'config/token.json'
+    # Utilisation du chemin configurable pour le jeton
+    token_path = config['calendar'].get('token_path', 'config/token.json')
 
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
@@ -138,13 +139,14 @@ def _create_event_body(rdv, key, notif_config, loc):
     notif_std, notif_first, last_day = notif_config
     day = rdv['start'].split('T')[0]
 
+    timezone = 'Europe/Paris'
     mins = notif_first if (day != last_day and notif_first > 0) else notif_std
 
     body = {
         'summary': f"{rdv['summary']} [{rdv['status']}]",
         'description': f"Synchronisé depuis Doctolib. SYNC_KEY: {key}",
-        'start': {'dateTime': rdv['start'], 'timeZone': 'Europe/Paris'},
-        'end': {'dateTime': rdv['end'], 'timeZone': 'Europe/Paris'},
+        'start': {'dateTime': rdv['start'], 'timeZone': timezone},
+        'end': {'dateTime': rdv['end'], 'timeZone': timezone},
         'reminders': {'useDefault': False, 'overrides': [{'method': 'popup', 'minutes': mins}]} if mins > 0 else {'useDefault': True}
     }
     if loc:
@@ -221,8 +223,14 @@ def main():
             rdvs = fetch_doctolib(config, w_start)
             existing = fetch_google_events(service, config['calendar']['id'], w_start)
             sync_week(service, config, rdvs, existing, w_start)
-        except (requests.RequestException, HttpError) as e:
-            print(f"Erreur semaine {w_start}: {e}")
+        except requests.RequestException as e:
+            if i == 0:
+                sys.exit(f"Erreur FATALE: Échec de la connexion Doctolib pour la semaine {w_start}. Vérifiez les cookies/URL.\nDétail de l'erreur: {e}")
+            print(f"Erreur semaine {w_start}: Impossible de récupérer les RDV. Passage à la semaine suivante.\n Détail: {e}")
+        except HttpError as e:
+            # Les erreurs Google (HttpError) n'arrêtent pas le script sauf si l'authentification
+            # a déjà échoué au début.
+            print(f"Erreur Google Calendar pour la semaine {w_start}: {e}")
 
 if __name__ == '__main__':
     main()

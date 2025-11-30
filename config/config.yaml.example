@@ -15,6 +15,8 @@ calendar:
   id: "votreadresse@group.calendar.google.com"
   # Chemin vers les identifiants téléchargés depuis la Google Cloud Console
   credentials_path: "config/credentials.json"
+  # Chemin vers le fichier de jeton d'authentification Google
+  token_path: "config/token.json"
 
 config:
   # Rappel par défaut pour tous les RDV (en minutes avant l'heure de début)
