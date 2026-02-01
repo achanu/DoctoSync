@@ -12,6 +12,7 @@ import os
 import sys
 import yaml
 import requests
+import browser_cookie3  # Nouvelle dépendance pour lecture auto
 
 # Imports Google
 from google.oauth2.credentials import Credentials
@@ -37,7 +38,38 @@ def load_yaml(path):
         sys.exit(f"Erreur: Fichier introuvable {path}")
 
 def get_cookies(path):
-    """Charge les cookies (détection auto format Netscape ou clé=valeur)."""
+    """
+    Charge les cookies :
+    1. Tente une détection automatique via le navigateur.
+    2. Si échec, tente de charger depuis le fichier (format Netscape ou clé=valeur).
+    """
+
+    domain = ".doctolib.fr"
+    # Liste des chargeurs à tester dans l'ordre
+    loaders = [
+        browser_cookie3.chrome,
+        browser_cookie3.firefox,
+        browser_cookie3.edge,
+        browser_cookie3.brave,
+        browser_cookie3.chromium,
+        browser_cookie3.safari
+    ]
+
+    print(f"{ANSI_BLUE}Recherche automatique des cookies Doctolib...{ANSI_RESET}")
+    
+    for loader in loaders:
+        try:
+            # Tente de récupérer les cookies pour le domaine
+            cj = loader(domain_name=domain)
+            if cj and len(cj) > 0:
+                print(f"{ANSI_GREEN}Cookies trouvés dans le navigateur (via {loader.__name__}).{ANSI_RESET}")
+                return cj  # On retourne le CookieJar directement (compatible requests)
+        except Exception:
+            # On ignore les erreurs (navigateur non installé, verrouillé, etc.)
+            continue
+
+    print(f"{ANSI_RED}Aucun cookie trouvé automatiquement. Tentative via fichier...{ANSI_RESET}")
+
     if not os.path.exists(path):
         return {}
 
@@ -78,7 +110,7 @@ def get_calendar_service(config):
 
     return build('calendar', 'v3', credentials=creds)
 
-def fetch_doctolib(config, start_date):
+def fetch_doctolib(config, start_date, cookies):
     """Récupère et nettoie les RDV Doctolib pour la semaine."""
     api = config['api']
     start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
@@ -91,11 +123,6 @@ def fetch_doctolib(config, start_date):
         'view': 'week',
         'include_patients': 'true'
     }
-
-    # Récupération
-    cookies = get_cookies(api['cookie_path'])
-    if not cookies:
-        print("Attention: Aucun cookie chargé.")
 
     resp = requests.get(api['url'], params=params, cookies=cookies,
                         headers={'User-Agent': api.get('user_agent', 'Mozilla/5.0')}, timeout=10)
@@ -212,6 +239,10 @@ def main():
 
     config = load_yaml("config/config.yaml")
 
+    cookies = get_cookies(config['api']['cookie_path'])
+    if not cookies:
+        print(f"{ANSI_RED}Attention: Aucun cookie chargé (ni navigateur, ni fichier).{ANSI_RESET}")
+
     try:
         service = get_calendar_service(config)
     except (ValueError, OSError, HttpError) as e:
@@ -225,7 +256,7 @@ def main():
         w_start = (monday + timedelta(weeks=i)).strftime("%Y-%m-%d")
 
         try:
-            rdvs = fetch_doctolib(config, w_start)
+            rdvs = fetch_doctolib(config, w_start, cookies)
             existing = fetch_google_events(service, config['calendar']['id'], w_start)
             sync_week(service, config, rdvs, existing, w_start)
         except requests.RequestException as e:
@@ -233,8 +264,6 @@ def main():
                 sys.exit(f"Erreur FATALE: Échec de la connexion Doctolib pour la semaine {w_start}. Vérifiez les cookies/URL.\nDétail de l'erreur: {e}")
             print(f"Erreur semaine {w_start}: Impossible de récupérer les RDV. Passage à la semaine suivante.\n Détail: {e}")
         except HttpError as e:
-            # Les erreurs Google (HttpError) n'arrêtent pas le script sauf si l'authentification
-            # a déjà échoué au début.
             print(f"Erreur Google Calendar pour la semaine {w_start}: {e}")
 
 if __name__ == '__main__':
