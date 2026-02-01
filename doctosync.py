@@ -123,8 +123,12 @@ def fetch_google_events(service, calendar_id, start_date):
     t_min = start_dt.replace(hour=0, minute=0, second=0).isoformat() + 'Z'
     t_max = (start_dt + timedelta(days=7)).replace(hour=0, minute=0, second=0).isoformat() + 'Z'
 
-    events = service.events().list(calendarId=calendar_id, timeMin=t_min, timeMax=t_max,
-                                   singleEvents=True).execute().get('items', [])
+    events = service.events().list(
+        calendarId=calendar_id,
+        timeMin=t_min,
+        timeMax=t_max,
+        singleEvents=True
+        ).execute().get('items', [])
 
     mapping = {}
     for e in events:
@@ -156,11 +160,12 @@ def _create_event_body(rdv, key, notif_config, loc):
 
 def _print_sync_stats(week_date, total_rdvs, stats, delete_count):
     """Affiche le résumé de la synchronisation avec couleurs."""
+    s_tot = f"{ANSI_BLUE}{total_rdvs}{ANSI_RESET}" if total_rdvs > 0 else f"{total_rdvs}"
     s_add = f"{ANSI_GREEN}+{stats['add']} créés{ANSI_RESET}" if stats['add'] > 0 else f"+{stats['add']} créés"
     s_upd = f"{ANSI_BLUE}~{stats['upd']} maj{ANSI_RESET}" if stats['upd'] > 0 else f"~{stats['upd']} maj"
     s_del = f"{ANSI_RED}-{delete_count} supprimés{ANSI_RESET}" if delete_count > 0 else f"-{delete_count} supprimés"
 
-    print(f"Semaine du {week_date} : {total_rdvs} RDVs | {s_add} / {s_upd} / {s_del}")
+    print(f"Semaine du {week_date} : {s_tot} RDVs | {s_add} / {s_upd} / {s_del}")
 
 def sync_week(service, config, rdvs, existing_map, week_date):
     """Logique principale de synchronisation (Création, MAJ, Suppression)."""
