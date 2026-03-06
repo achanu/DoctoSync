@@ -131,7 +131,7 @@ def fetch_doctolib(config, start_date, cookies):
     # Nettoyage
     clean_rdvs = []
     for item in resp.json().get('data', []):
-        if item.get('status', 'confirmed').lower() == 'deleted':
+        if item.get('status', 'confirmed').lower() in ('deleted', 'no_show_but_ok'):
             continue
 
         is_new = item.get('new_patient', False)
