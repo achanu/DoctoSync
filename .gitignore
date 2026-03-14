@@ -212,3 +212,7 @@ config/cookies.txt
 config/credentials.json
 config/token.json
 sample
+
+# DoctoSync generated files
+cache/
+output/
