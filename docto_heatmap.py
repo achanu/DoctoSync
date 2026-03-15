@@ -15,6 +15,7 @@ Utilisation :
     python docto_heatmap.py --type all new followup --gaps --trend --score
     python docto_heatmap.py --simulate lun 09:00 --simulate-weeks 4
     python docto_heatmap.py -w 8 -r 60 --no-cache
+    python docto_heatmap.py --forecast --forecast-weeks 4
 """
 
 import argparse
@@ -26,6 +27,7 @@ from typing import Any
 
 import browser_cookie3
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import pandas as pd
 import requests
 import seaborn as sns
@@ -223,6 +225,40 @@ def get_past_week_starts(n: int) -> list[str]:
         (current_monday - timedelta(weeks=i)).strftime('%Y-%m-%d')
         for i in range(n, 0, -1)
     ]
+
+
+def load_future_from_cache(
+        cache_path: str | None,
+        n_future: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Charge la semaine courante et les semaines futures depuis le cache.
+
+    Ne fait aucun appel API. Alimenté par doctosync.py lors de la synchro.
+    Les semaines absentes du cache sont silencieusement ignorées.
+
+    Args:
+        cache_path: Chemin du fichier de cache, ou None si désactivé.
+        n_future: Nombre de semaines futures à charger (courante incluse).
+
+    Returns:
+        Tuple (rdvs, liste des semaines effectivement chargées).
+    """
+    if not cache_path:
+        return [], []
+    cache = load_cache(cache_path)
+    today = datetime.date.today()
+    monday = today - timedelta(days=today.weekday())
+    week_starts = [
+        (monday + timedelta(weeks=i)).strftime('%Y-%m-%d')
+        for i in range(n_future + 1)
+    ]
+    rdvs: list[dict[str, Any]] = []
+    loaded: list[str] = []
+    for ws in week_starts:
+        if ws in cache:
+            rdvs.extend(cache[ws])
+            loaded.append(ws)
+    return rdvs, loaded
 
 
 def fetch_all_appointments(
@@ -550,6 +586,24 @@ def _score_matrix(
     # Zéro pour les créneaux sans aucune donnée.
     score[total_matrix == 0] = 0
     return score
+
+
+def _cancel_rate_matrix(df_all: pd.DataFrame) -> pd.DataFrame:
+    """Taux d'annulation historique par (start_slot, weekday).
+
+    Args:
+        df_all: DataFrame complet (confirmés + annulés).
+
+    Returns:
+        DataFrame pivot (start_slot × weekday 0-6) de taux [0-1].
+        Valeur 0 si aucune donnée historique pour ce créneau.
+    """
+    total = _start_slot_matrix(df_all)
+    if total.empty:
+        return pd.DataFrame(dtype=float)
+    cancel = _start_slot_matrix(df_all[df_all['cancelled']])
+    cancel = cancel.reindex_like(total).fillna(0)
+    return cancel.div(total.replace(0, float('nan'))).fillna(0)
 
 
 def _slot_label(slot_index: int, slot_minutes: int) -> str:
@@ -923,6 +977,294 @@ def simulate_slot(
     )
 
 
+def plot_fill_forecast(
+        df_future: pd.DataFrame,
+        hist_avg: float,
+        output_path: str,
+) -> None:
+    """Taux de remplissage prévisionnel : RDVs confirmés par semaine future.
+
+    Compare le nombre de RDVs déjà réservés à la moyenne historique.
+    Rouge : <80 % | Orange : 80–100 % | Bleu : ≥ 100 %.
+
+    Args:
+        df_future: DataFrame des RDVs futurs issus de _parse_appointments.
+        hist_avg: Moyenne historique de RDVs confirmés par semaine.
+        output_path: Chemin complet du fichier PNG de sortie.
+    """
+    df_conf = df_future[~df_future['cancelled']]
+    if df_conf.empty:
+        print(
+            f'  {_ANSI_RED}Forecast remplissage : '
+            f'aucun RDV futur dans le cache.{_ANSI_RESET}'
+        )
+        return
+
+    weekly = df_conf.groupby('week_start').size()
+    pcts = (weekly / hist_avg * 100) if hist_avg > 0 else weekly * 0
+    colors = [
+        'tomato' if p < 80 else 'gold' if p < 100 else 'steelblue'
+        for p in pcts.values
+    ]
+
+    fig, ax = plt.subplots(figsize=(max(8, len(weekly) * 1.5), 5))
+    bars = ax.bar(
+        range(len(weekly)), weekly.values,
+        color=colors, edgecolor='white', width=0.6,
+    )
+    if hist_avg > 0:
+        ax.axhline(
+            hist_avg, color='gray', linestyle='--', linewidth=1.2,
+            label=f'Moyenne historique ({hist_avg:.1f} RDVs/sem)',
+        )
+    for bar, pct in zip(bars, pcts.values):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.1,
+            f'{pct:.0f}%',
+            ha='center', va='bottom', fontsize=9,
+        )
+    ax.set_title(
+        'Taux de remplissage prévisionnel (semaines à venir)',
+        fontsize=13, pad=10,
+    )
+    ax.set_xlabel('Semaine', fontsize=11)
+    ax.set_ylabel('RDVs confirmés', fontsize=11)
+    ax.set_xticks(range(len(weekly)))
+    ax.set_xticklabels(weekly.index, rotation=45, ha='right', fontsize=9)
+    if hist_avg > 0:
+        ax.legend(fontsize=10)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(
+        f'  {_ANSI_GREEN}Forecast remplissage sauvegardé : '
+        f'{output_path}{_ANSI_RESET}'
+    )
+
+
+def plot_cancel_risk_forecast(
+        df_future: pd.DataFrame,
+        cancel_rate: pd.DataFrame,
+        output_path: str,
+        slot_minutes: int,
+) -> None:
+    """Heatmap du risque d'annulation sur les créneaux futurs réservés.
+
+    Pour chaque créneau (slot × jour) avec des RDVs futurs, estime le nombre
+    de RDVs susceptibles d'être annulés d'après le taux historique.
+
+    Args:
+        df_future: DataFrame des RDVs futurs issus de _parse_appointments.
+        cancel_rate: Taux d'annulation historique issu de _cancel_rate_matrix.
+        output_path: Chemin complet du fichier PNG de sortie.
+        slot_minutes: Résolution des créneaux en minutes (pour les labels).
+    """
+    df_fut_conf = df_future[~df_future['cancelled']]
+    if df_fut_conf.empty or cancel_rate.empty:
+        print(
+            f'  {_ANSI_RED}Forecast risque : données insuffisantes.{_ANSI_RESET}'
+        )
+        return
+
+    future_booked = _start_slot_matrix(df_fut_conf)
+    all_idx = future_booked.index.union(cancel_rate.index)
+    future_booked = future_booked.reindex(
+        index=all_idx, columns=range(7), fill_value=0
+    )
+    cr = cancel_rate.reindex(index=all_idx, columns=range(7), fill_value=0)
+    risk = future_booked.multiply(cr).where(
+        future_booked > 0, other=float('nan')
+    )
+
+    if risk.isna().all().all():
+        print(
+            f'  {_ANSI_RED}Forecast risque : '
+            f'aucun créneau futur réservé.{_ANSI_RESET}'
+        )
+        return
+
+    all_slots = range(risk.index.min(), risk.index.max() + 1)
+    risk = risk.reindex(index=all_slots, columns=range(7))
+    y_labels = [_slot_label(i, slot_minutes) for i in risk.index]
+
+    fig, ax = plt.subplots(figsize=(10, max(6, len(y_labels) * 0.4)))
+    sns.heatmap(
+        risk,
+        ax=ax,
+        cmap='YlOrRd',
+        annot=True,
+        fmt='.1f',
+        linewidths=0.5,
+        linecolor='white',
+        cbar_kws={'label': 'RDVs à risque (attendus)'},
+        xticklabels=_DAYS_FR,
+        yticklabels=y_labels,
+    )
+    ax.set_title(
+        "Risque d'annulation par créneau (semaines futures réservées)",
+        fontsize=13, pad=10,
+    )
+    ax.set_xlabel('Jour de la semaine', fontsize=11)
+    ax.set_ylabel('Créneau horaire', fontsize=11)
+    ax.tick_params(axis='both', labelsize=9)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(
+        f'  {_ANSI_GREEN}Forecast risque sauvegardé : '
+        f'{output_path}{_ANSI_RESET}'
+    )
+
+
+def plot_charge_glissante(
+        df_hist: pd.DataFrame,
+        df_future: pd.DataFrame,
+        output_path: str,
+) -> None:
+    """Vue glissante passé + futur : charge hebdomadaire sur un seul graphe.
+
+    Bleu : semaines passées | Violet : semaine courante | Orange : futures.
+
+    Args:
+        df_hist: DataFrame historique (confirmés + annulés).
+        df_future: DataFrame des RDVs futurs issus de _parse_appointments.
+        output_path: Chemin complet du fichier PNG de sortie.
+    """
+    hist_conf = df_hist[~df_hist['cancelled']].groupby('week_start').size()
+    fut_conf = (
+        df_future[~df_future['cancelled']].groupby('week_start').size()
+        if not df_future.empty else pd.Series(dtype=int)
+    )
+
+    today_monday = (
+        datetime.date.today() - timedelta(days=datetime.date.today().weekday())
+    ).isoformat()
+
+    all_weeks = sorted(set(hist_conf.index) | set(fut_conf.index))
+    counts = [
+        int(hist_conf.get(w, fut_conf.get(w, 0)))
+        for w in all_weeks
+    ]
+    colors = [
+        'mediumpurple' if w == today_monday
+        else 'darkorange' if w > today_monday
+        else 'steelblue'
+        for w in all_weeks
+    ]
+
+    fig, ax = plt.subplots(figsize=(max(10, len(all_weeks) * 0.9), 5))
+    bars = ax.bar(
+        range(len(all_weeks)), counts,
+        color=colors, edgecolor='white', width=0.7,
+    )
+    for bar, val in zip(bars, counts):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.1,
+            str(val),
+            ha='center', va='bottom', fontsize=8,
+        )
+
+    legend_els = [
+        Patch(facecolor='steelblue', label='Passé'),
+        Patch(facecolor='mediumpurple', label='Semaine courante'),
+        Patch(facecolor='darkorange', label='Futur (cache)'),
+    ]
+    ax.legend(handles=legend_els, fontsize=10)
+    ax.set_title(
+        'Charge hebdomadaire glissante (passé → futur)',
+        fontsize=13, pad=10,
+    )
+    ax.set_xlabel('Semaine', fontsize=11)
+    ax.set_ylabel('RDVs confirmés', fontsize=11)
+    ax.set_xticks(range(len(all_weeks)))
+    ax.set_xticklabels(all_weeks, rotation=45, ha='right', fontsize=8)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(
+        f'  {_ANSI_GREEN}Charge glissante sauvegardée : '
+        f'{output_path}{_ANSI_RESET}'
+    )
+
+
+def plot_carnet_projection(
+        df_future: pd.DataFrame,
+        cancel_rate: pd.DataFrame,
+        output_path: str,
+) -> None:
+    """Projection du carnet : RDVs attendus après annulations par semaine.
+
+    Pour chaque RDV futur confirmé, applique le taux d'annulation historique
+    de son créneau (modèle Bernoulli) pour estimer l'espérance de RDVs
+    maintenus et l'incertitude (±1 σ).
+
+    Args:
+        df_future: DataFrame des RDVs futurs issus de _parse_appointments.
+        cancel_rate: Taux d'annulation historique issu de _cancel_rate_matrix.
+        output_path: Chemin complet du fichier PNG de sortie.
+    """
+    df_fut_conf = df_future[~df_future['cancelled']]
+    if df_fut_conf.empty:
+        print(
+            f'  {_ANSI_RED}Projection carnet : '
+            f'aucun RDV futur dans le cache.{_ANSI_RESET}'
+        )
+        return
+
+    rows = []
+    for _, row in df_fut_conf.iterrows():
+        slot = int(row['start_slot'])
+        wd = int(row['weekday'])
+        p_cancel = (
+            float(cancel_rate.loc[slot, wd])
+            if slot in cancel_rate.index and wd in cancel_rate.columns
+            else 0.0
+        )
+        rows.append({
+            'week_start': row['week_start'],
+            'expected': 1 - p_cancel,
+            'variance': p_cancel * (1 - p_cancel),
+        })
+
+    proj = (
+        pd.DataFrame(rows)
+        .groupby('week_start')
+        .agg(
+            booked=('expected', 'count'),
+            expected=('expected', 'sum'),
+            std=('variance', lambda v: v.sum() ** 0.5),
+        )
+    )
+
+    fig, ax = plt.subplots(figsize=(max(8, len(proj) * 1.5), 5))
+    x = range(len(proj))
+    ax.bar(x, proj['booked'], color='lightsteelblue', label='RDVs réservés', width=0.6)
+    ax.bar(x, proj['expected'], color='steelblue', label='RDVs attendus (proj.)', width=0.6)
+    ax.errorbar(
+        x, proj['expected'], yerr=proj['std'],
+        fmt='none', color='black', capsize=4, linewidth=1.2,
+        label='±1σ (incertitude)',
+    )
+    ax.set_title(
+        'Projection du carnet de RDVs (après annulations estimées)',
+        fontsize=13, pad=10,
+    )
+    ax.set_xlabel('Semaine', fontsize=11)
+    ax.set_ylabel('RDVs', fontsize=11)
+    ax.set_xticks(x)
+    ax.set_xticklabels(proj.index, rotation=45, ha='right', fontsize=9)
+    ax.legend(fontsize=10)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(
+        f'  {_ANSI_GREEN}Projection carnet sauvegardée : '
+        f'{output_path}{_ANSI_RESET}'
+    )
+
+
 def _generate_pair(
         df: pd.DataFrame,
         label: str,
@@ -1096,6 +1438,25 @@ def main() -> None:
         metavar='N',
         help='Nombre de semaines futures pour la projection (défaut: 4).',
     )
+    parser.add_argument(
+        '--forecast',
+        action='store_true',
+        help=(
+            'Active les analyses prévisionnelles sur les semaines futures '
+            'du cache (alimenté par doctosync.py) : remplissage, risque '
+            "d'annulation, charge glissante, projection du carnet."
+        ),
+    )
+    parser.add_argument(
+        '--forecast-weeks',
+        type=int,
+        default=4,
+        metavar='N',
+        help=(
+            'Nombre de semaines futures à charger depuis le cache '
+            '(semaine courante incluse, défaut: 4).'
+        ),
+    )
     args = parser.parse_args()
 
     if args.resolution <= 0 or 60 % args.resolution != 0:
@@ -1199,6 +1560,50 @@ def main() -> None:
             ),
             args.resolution,
         )
+
+    if args.forecast:
+        print(
+            f'\n{_ANSI_BLUE}Analyses prévisionnelles '
+            f'({args.forecast_weeks} semaine(s) futures)...{_ANSI_RESET}'
+        )
+        future_rdvs, future_weeks = load_future_from_cache(
+            cache_path, args.forecast_weeks
+        )
+        if not future_rdvs:
+            print(
+                f'  {_ANSI_RED}Aucune donnée future dans le cache. '
+                f'Lancez doctosync.py pour alimenter le cache.{_ANSI_RESET}'
+            )
+        else:
+            print(
+                f'  Semaines chargées : '
+                f'{", ".join(future_weeks)}'
+            )
+            df_future = _parse_appointments(future_rdvs, args.resolution)
+            cancel_rate = _cancel_rate_matrix(df_all)
+            hist_avg = len(df_conf) / args.weeks
+
+            plot_fill_forecast(
+                df_future,
+                hist_avg,
+                os.path.join(args.output, 'forecast_remplissage.png'),
+            )
+            plot_cancel_risk_forecast(
+                df_future,
+                cancel_rate,
+                os.path.join(args.output, 'forecast_risque_annulation.png'),
+                args.resolution,
+            )
+            plot_charge_glissante(
+                df_all,
+                df_future,
+                os.path.join(args.output, 'forecast_charge_glissante.png'),
+            )
+            plot_carnet_projection(
+                df_future,
+                cancel_rate,
+                os.path.join(args.output, 'forecast_carnet_projection.png'),
+            )
 
 
 if __name__ == '__main__':
