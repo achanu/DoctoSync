@@ -12,6 +12,7 @@ import browser_cookie3
 import requests
 import yaml
 
+from cache_utils import _CACHE_FILE_DEFAULT, load_cache, save_cache
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -182,21 +183,18 @@ def fetch_doctolib(
     )
     resp.raise_for_status()
 
-    clean_rdvs = []
+    rdvs = []
     for item in resp.json().get('data', []):
         status = item.get('status', 'confirmed').lower()
-        if status in ('deleted', 'no_show_but_ok'):
-            continue
-
-        is_new = item.get('new_patient', False)
-        clean_rdvs.append({
+        rdvs.append({
             'start': item.get('start_date'),
             'end': item.get('end_date'),
-            'new_patient': is_new,
-            'summary': 'Nouveau patient' if is_new else 'Suivi',
-            'status': item.get('status', 'confirmed'),
+            'new_patient': item.get('new_patient', False),
+            'status': status,
+            'cancelled': status in ('deleted', 'no_show_but_ok'),
+            'created_at': item.get('created_at'),
         })
-    return [r for r in clean_rdvs if r['start'] and r['end']]
+    return [r for r in rdvs if r['start'] and r['end']]
 
 
 def fetch_google_events(
@@ -391,9 +389,20 @@ def main() -> None:
     """Point d'entrée principal du script de synchronisation."""
     parser = argparse.ArgumentParser()
     parser.add_argument('-w', '--weeks', type=int, default=1)
+    parser.add_argument(
+        '--cache-file',
+        default=_CACHE_FILE_DEFAULT,
+        help='Chemin du fichier de cache partagé avec docto_heatmap.',
+    )
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help='Ne pas écrire dans le cache après la synchro.',
+    )
     args = parser.parse_args()
 
     config = load_yaml('config/config.yaml')
+    cache_path = None if args.no_cache else args.cache_file
 
     cookies = get_cookies(config['api']['cookie_path'])
     if not cookies:
@@ -414,15 +423,30 @@ def main() -> None:
 
     print(f'Synchronisation sur {args.weeks} semaine(s)...')
 
+    cache: dict[str, list] = load_cache(cache_path) if cache_path else {}
+    cache_updated = False
+
     for i in range(args.weeks):
         w_start = (monday + timedelta(weeks=i)).strftime('%Y-%m-%d')
 
         try:
-            rdvs = fetch_doctolib(config, w_start, cookies)
+            all_rdvs = fetch_doctolib(config, w_start, cookies)
+
+            # Alimente le cache avec les données brutes (annulés inclus).
+            if cache_path:
+                cache[w_start] = all_rdvs
+                cache_updated = True
+
+            # Filtre les RDVs confirmés pour la synchro Google Calendar.
+            sync_rdvs = [
+                {**r, 'summary': 'Nouveau patient' if r['new_patient'] else 'Suivi'}
+                for r in all_rdvs if not r['cancelled']
+            ]
+
             existing = fetch_google_events(
                 service, config['calendar']['id'], w_start
             )
-            sync_week(service, config, rdvs, existing, w_start)
+            sync_week(service, config, sync_rdvs, existing, w_start)
         except requests.RequestException as e:
             if i == 0:
                 sys.exit(
@@ -438,6 +462,10 @@ def main() -> None:
             print(
                 f'Erreur Google Calendar pour la semaine {w_start}: {e}'
             )
+
+    if cache_updated and cache_path:
+        save_cache(cache_path, cache)
+        print(f'{_ANSI_GREEN}Cache mis à jour : {cache_path}{_ANSI_RESET}')
 
 
 if __name__ == '__main__':

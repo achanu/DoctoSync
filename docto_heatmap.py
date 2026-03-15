@@ -20,7 +20,6 @@ Utilisation :
 import argparse
 import datetime
 from datetime import timedelta
-import json
 import os
 import sys
 from typing import Any
@@ -32,9 +31,9 @@ import requests
 import seaborn as sns
 import yaml
 
+from cache_utils import _CACHE_FILE_DEFAULT, _CACHE_VERSION, load_cache, save_cache
+
 _DAYS_FR = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim']
-_CACHE_FILE_DEFAULT = 'cache/.heatmap_cache.json'
-_CACHE_VERSION = 2  # Bump si le format des données stockées change.
 _OUTPUT_DIR_DEFAULT = 'output'
 
 # Mapping type de RDV → (suffixe de titre, préfixe de fichier).
@@ -200,58 +199,6 @@ def fetch_doctolib(
             'created_at': item.get('created_at'),
         })
     return [r for r in rdvs if r['start'] and r['end']]
-
-
-# ---------------------------------------------------------------------------
-# Cache
-# ---------------------------------------------------------------------------
-
-def load_cache(path: str) -> dict[str, list[dict[str, Any]]]:
-    """Charge le cache depuis un fichier JSON.
-
-    Si la version du cache est inférieure à _CACHE_VERSION, le cache est
-    considéré obsolète et un dict vide est retourné (re-fetch forcé).
-
-    Args:
-        path: Chemin vers le fichier de cache.
-
-    Returns:
-        Dictionnaire {week_start: [rdv, ...]} sans la clé '_version'.
-    """
-    if not os.path.exists(path):
-        return {}
-    with open(path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    if data.get('_version', 1) < _CACHE_VERSION:
-        print(
-            f'  {_ANSI_BLUE}Cache obsolète '
-            f'(v{data.get("_version", 1)} → v{_CACHE_VERSION}), '
-            f're-fetch complet.{_ANSI_RESET}'
-        )
-        return {}
-
-    return {k: v for k, v in data.items() if k != '_version'}
-
-
-def save_cache(
-        path: str,
-        cache: dict[str, list[dict[str, Any]]],
-) -> None:
-    """Persiste le cache dans un fichier JSON avec versioning.
-
-    Crée le répertoire parent si nécessaire.
-
-    Args:
-        path: Chemin vers le fichier de cache.
-        cache: Dictionnaire {week_start: [rdv, ...]} à sauvegarder.
-    """
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    data = {'_version': _CACHE_VERSION, **cache}
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------------
