@@ -1,28 +1,5 @@
 # TODO — Évolutions futures
 
-## Taux de remplissage réel
-
-**Objectif** : comparer les RDVs pris avec les créneaux *ouverts* sur Doctolib,
-pour obtenir un vrai taux de remplissage (et non juste un comptage de RDVs).
-
-**Bloquant** : nécessite de fetcher les créneaux disponibles via l'API
-(endpoint de disponibilités), en plus des RDVs pris. À investiguer.
-
-**Lien** : similaire à "Créneaux manqués" ci-dessous — les deux partagent le
-même prérequis de données sur les créneaux ouverts.
-
----
-
-## Créneaux manqués (slots ouverts non réservés)
-
-**Objectif** : identifier les créneaux régulièrement ouverts mais jamais
-(ou rarement) réservés — ceux à supprimer ou déplacer.
-
-**Bloquant** : même prérequis que le taux de remplissage (données de
-disponibilités depuis l'API).
-
----
-
 ## Détection des annulations tardives
 
 **Objectif** : identifier les créneaux ou jours ayant un taux élevé

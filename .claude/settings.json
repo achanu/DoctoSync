@@ -14,7 +14,11 @@
       "Bash(git rm:*)",
       "Bash(grep:*)",
       "Bash(ls:*)",
-      "Bash(sed:*)"
+      "Bash(pylint:*)",
+      "Bash(sed:*)",
+      "Read(main/**)",
+      "Read(**)",
+      "Bash(python -c \":*)"
     ]
   }
 }

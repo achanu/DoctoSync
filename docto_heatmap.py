@@ -25,15 +25,24 @@ import os
 import sys
 from typing import Any
 
-import browser_cookie3
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import pandas as pd
 import requests
 import seaborn as sns
-import yaml
-
-from cache_utils import _CACHE_FILE_DEFAULT, _CACHE_VERSION, load_cache, save_cache
+from docto_common import (
+    _ANSI_BLUE,
+    _ANSI_GREEN,
+    _ANSI_RED,
+    _ANSI_RESET,
+    _CACHE_FILE_DEFAULT,
+    fetch_doctolib,
+    fetch_recurring_events,
+    get_cookies,
+    load_cache,
+    load_yaml,
+    save_cache,
+)
 
 _DAYS_FR = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim']
 _OUTPUT_DIR_DEFAULT = 'output'
@@ -46,162 +55,6 @@ _RDV_TYPES: dict[str, tuple[str, str]] = {
     'followup': (' — Suivis', 'followup'),
     'cancelled': (' — Annulations', 'cancelled'),
 }
-
-_ANSI_GREEN = '\033[92m'
-_ANSI_BLUE = '\033[94m'
-_ANSI_RED = '\033[91m'
-_ANSI_RESET = '\033[0m'
-
-
-# ---------------------------------------------------------------------------
-# Configuration & cookies
-# ---------------------------------------------------------------------------
-
-def load_yaml(path: str) -> dict[str, Any]:
-    """Charge la configuration depuis un fichier YAML.
-
-    Args:
-        path: Chemin vers le fichier de configuration.
-
-    Returns:
-        Le contenu du fichier YAML sous forme de dictionnaire.
-
-    Raises:
-        SystemExit: Si le fichier est introuvable.
-    """
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-    except FileNotFoundError:
-        sys.exit(f'Erreur: Fichier introuvable {path}')
-
-
-def get_cookies(path: str) -> Any:
-    """Charge les cookies Doctolib depuis le navigateur ou un fichier.
-
-    Tente d'abord une détection automatique via les navigateurs installés,
-    puis se rabat sur le fichier de cookies si nécessaire.
-
-    Args:
-        path: Chemin vers le fichier de cookies (format Netscape ou
-            clé=valeur).
-
-    Returns:
-        Un CookieJar si trouvé dans le navigateur, un dict de cookies si
-        chargé depuis le fichier, ou un dict vide si aucun cookie trouvé.
-    """
-    domain = '.doctolib.fr'
-    loaders = [
-        browser_cookie3.chrome,
-        browser_cookie3.firefox,
-        browser_cookie3.edge,
-        browser_cookie3.brave,
-        browser_cookie3.chromium,
-        browser_cookie3.safari,
-    ]
-
-    print(
-        f'{_ANSI_BLUE}Recherche automatique des cookies '
-        f'Doctolib...{_ANSI_RESET}'
-    )
-
-    for loader in loaders:
-        try:
-            cj = loader(domain_name=domain)
-            if cj and len(cj) > 0:
-                print(
-                    f'{_ANSI_GREEN}Cookies trouvés dans le navigateur '
-                    f'(via {loader.__name__}).{_ANSI_RESET}'
-                )
-                return cj
-        except Exception:  # noqa: BLE001 — erreurs navigateur ignorées
-            continue
-
-    print(
-        f'{_ANSI_RED}Aucun cookie trouvé automatiquement. '
-        f'Tentative via fichier...{_ANSI_RESET}'
-    )
-
-    if not os.path.exists(path):
-        return {}
-
-    with open(path, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    cookies: dict[str, str] = {}
-    if '\t' in content:  # Format Netscape (supposé si tabulations présentes).
-        for line in content.splitlines():
-            parts = line.strip().split('\t')
-            if len(parts) >= 7 and not line.startswith('#'):
-                cookies[parts[5]] = parts[6]
-    else:  # Format simple (clé=val; clé=val).
-        for pair in content.replace('; ', ';').split(';'):
-            if '=' in pair:
-                k, v = pair.split('=', 1)
-                cookies[k] = v
-    return cookies
-
-
-# ---------------------------------------------------------------------------
-# API Doctolib
-# ---------------------------------------------------------------------------
-
-def fetch_doctolib(
-        config: dict[str, Any],
-        start_date: str,
-        cookies: Any,
-) -> list[dict[str, Any]]:
-    """Récupère les RDV Doctolib pour une semaine donnée, annulations incluses.
-
-    Contrairement à doctosync.py, les RDVs annulés sont conservés (marqués
-    cancelled=True) afin de permettre l'analyse du taux d'annulation.
-
-    Args:
-        config: Configuration contenant les paramètres de l'API Doctolib.
-        start_date: Date de début de la semaine au format 'YYYY-MM-DD'.
-        cookies: Cookies d'authentification Doctolib.
-
-    Returns:
-        Liste de RDVs, chacun sous forme de dictionnaire avec les champs :
-        start, end, new_patient, status, cancelled, created_at.
-
-    Raises:
-        requests.RequestException: En cas d'erreur réseau ou HTTP.
-    """
-    api = config['api']
-    start_dt = datetime.datetime.strptime(start_date, '%Y-%m-%d')
-    end_dt = start_dt + timedelta(days=7) - timedelta(seconds=1)
-
-    params = {
-        'agenda_ids': api['agenda_ids'],
-        'start_date': start_dt.strftime(api['date_format']),
-        'end_date': end_dt.strftime(api['date_format']),
-        'view': 'week',
-        'include_patients': 'true',
-    }
-
-    resp = requests.get(
-        api['url'],
-        params=params,
-        cookies=cookies,
-        headers={'User-Agent': api.get('user_agent', 'Mozilla/5.0')},
-        timeout=10,
-    )
-    resp.raise_for_status()
-
-    rdvs = []
-    for item in resp.json().get('data', []):
-        status = item.get('status', 'confirmed').lower()
-        rdvs.append({
-            'start': item.get('start_date'),
-            'end': item.get('end_date'),
-            'new_patient': item.get('new_patient', False),
-            'status': status,
-            'cancelled': status in ('deleted', 'no_show_but_ok'),
-            'created_at': item.get('created_at'),
-        })
-    return [r for r in rdvs if r['start'] and r['end']]
-
 
 # ---------------------------------------------------------------------------
 # Récupération
@@ -316,6 +169,76 @@ def fetch_all_appointments(
     return all_rdvs
 
 
+def fetch_all_open_periods(
+        config: dict[str, Any],
+        cookies: Any,
+        week_starts: list[str],
+        cache_path: str | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Récupère les événements d'ouverture pour chaque semaine, avec cache.
+
+    Args:
+        config: Configuration globale du script.
+        cookies: Cookies d'authentification Doctolib.
+        week_starts: Liste de dates de début de semaine 'YYYY-MM-DD'.
+        cache_path: Chemin du fichier de cache JSON dédié aux périodes
+            d'ouverture, ou None pour désactiver.
+
+    Returns:
+        Dictionnaire {week_start: [events]} pour toutes les semaines.
+    """
+    cache: dict[str, list[dict[str, Any]]] = (
+        load_cache(cache_path) if cache_path else {}
+    )
+    cache_updated = False
+    result: dict[str, list[dict[str, Any]]] = {}
+
+    for week_start in week_starts:
+        if cache_path and week_start in cache:
+            result[week_start] = cache[week_start]
+            print(
+                f'  Périodes {week_start} : '
+                f'{_ANSI_BLUE}(cache){_ANSI_RESET}.'
+            )
+        else:
+            try:
+                events = fetch_recurring_events(config, week_start, cookies)
+                result[week_start] = events
+                print(
+                    f'  Périodes {week_start} : {len(events)} événements.'
+                )
+                if cache_path:
+                    cache[week_start] = events
+                    cache_updated = True
+            except requests.HTTPError as e:
+                print(
+                    f'  {_ANSI_RED}Erreur périodes {week_start}: '
+                    f'{e}{_ANSI_RESET}'
+                )
+                if e.response is not None and e.response.status_code == 401:
+                    print(
+                        f'  {_ANSI_RED}Session expirée (401) — '
+                        f'récupération des périodes abandonnée.{_ANSI_RESET}'
+                    )
+                    break
+                result[week_start] = []
+            except requests.RequestException as e:
+                print(
+                    f'  {_ANSI_RED}Erreur périodes {week_start}: '
+                    f'{e}{_ANSI_RESET}'
+                )
+                result[week_start] = []
+
+    if cache_updated and cache_path:
+        save_cache(cache_path, cache)
+        print(
+            f'  {_ANSI_GREEN}Cache périodes mis à jour : '
+            f'{cache_path}{_ANSI_RESET}'
+        )
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Transformation
 # ---------------------------------------------------------------------------
@@ -388,6 +311,85 @@ def _parse_appointments(
             'lead_time_days': _lead_time_days(rdv),
         })
     return pd.DataFrame(rows)
+
+
+def _parse_open_periods(
+        events: list[dict[str, Any]],
+        slot_minutes: int,
+) -> dict[int, set[int]]:
+    """Calcule les créneaux ouverts nets par jour de semaine.
+
+    Les événements 'open' définissent la disponibilité brute ; les 'blck'
+    en soustraient une partie. Le résultat ne dépend que des heures de début
+    et de fin de chaque événement dans la semaine interrogée.
+
+    Args:
+        events: Événements issus de fetch_recurring_events (une semaine).
+        slot_minutes: Résolution des créneaux en minutes.
+
+    Returns:
+        Dictionnaire {weekday (0=Lun): ensemble des index de créneaux ouverts}.
+    """
+    open_windows: dict[int, list[tuple[int, int]]] = {}
+    block_windows: dict[int, list[tuple[int, int]]] = {}
+
+    for ev in events:
+        dt_start = datetime.datetime.fromisoformat(ev['start_date'])
+        dt_end = datetime.datetime.fromisoformat(ev['end_date'])
+        wd = dt_start.weekday()
+        start_min = dt_start.hour * 60 + dt_start.minute
+        end_min = dt_end.hour * 60 + dt_end.minute
+        if ev.get('type') == 'open':
+            open_windows.setdefault(wd, []).append((start_min, end_min))
+        elif ev.get('type') == 'blck':
+            block_windows.setdefault(wd, []).append((start_min, end_min))
+
+    result: dict[int, set[int]] = {}
+    for wd, windows in open_windows.items():
+        open_slots: set[int] = set()
+        for start_m, end_m in windows:
+            for s in range(
+                start_m // slot_minutes,
+                (end_m - 1) // slot_minutes + 1,
+            ):
+                open_slots.add(s)
+        for start_m, end_m in block_windows.get(wd, []):
+            for s in range(
+                start_m // slot_minutes,
+                (end_m - 1) // slot_minutes + 1,
+            ):
+                open_slots.discard(s)
+        result[wd] = open_slots
+    return result
+
+
+def _open_count_matrix(
+        events_by_week: dict[str, list[dict[str, Any]]],
+        slot_minutes: int,
+) -> pd.DataFrame:
+    """Compte le nombre de semaines où chaque créneau était ouvert.
+
+    Args:
+        events_by_week: {week_start: [events]} issu de fetch_all_open_periods.
+        slot_minutes: Résolution des créneaux en minutes.
+
+    Returns:
+        DataFrame (slot × weekday 0-6) contenant le nombre de semaines où
+        chaque créneau était ouvert. 0 signifie jamais ouvert sur la période.
+    """
+    counts: dict[tuple[int, int], int] = {}
+    for events in events_by_week.values():
+        for wd, slots in _parse_open_periods(events, slot_minutes).items():
+            for slot in slots:
+                key = (slot, wd)
+                counts[key] = counts.get(key, 0) + 1
+
+    if not counts:
+        return pd.DataFrame(dtype=int)
+
+    series = pd.Series(counts)
+    df = series.unstack(level=1, fill_value=0)
+    return df.reindex(columns=range(7), fill_value=0)
 
 
 def _filter_by_type(df: pd.DataFrame, rdv_type: str) -> pd.DataFrame:
@@ -483,16 +485,23 @@ def _weekly_matrix(df: pd.DataFrame, slot_minutes: int) -> pd.DataFrame:
     return pivot.reindex(index=all_slots, columns=range(7), fill_value=0)
 
 
-def _gap_matrix(df: pd.DataFrame, slot_minutes: int) -> pd.DataFrame:
+def _gap_matrix(
+        df: pd.DataFrame,
+        slot_minutes: int,
+        open_count: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Compte les créneaux libres (trous) entre RDVs consécutifs par jour.
 
     Pour chaque paire de RDVs consécutifs dans la même journée, les créneaux
     libres entre la fin du premier et le début du second sont enregistrés.
-    Le résultat montre les plages horaires structurellement sous-utilisées.
+    Si open_count est fourni, seuls les gaps dans des créneaux ouverts sont
+    conservés (les trous hors horaires d'ouverture sont ignorés).
 
     Args:
         df: DataFrame de RDVs confirmés issu de _parse_appointments.
         slot_minutes: Résolution des créneaux en minutes (pour le fallback).
+        open_count: DataFrame (slot × weekday) issu de _open_count_matrix,
+            ou None pour ne pas filtrer.
 
     Returns:
         DataFrame de forme (N_slots, 7) avec le compte de gaps par créneau.
@@ -507,9 +516,15 @@ def _gap_matrix(df: pd.DataFrame, slot_minutes: int) -> pd.DataFrame:
             gap_end = curr['start_slot'] - 1
             if gap_end >= gap_start:
                 for slot in range(gap_start, gap_end + 1):
-                    free_slots.append(
-                        {'slot': slot, 'weekday': prev['weekday']}
-                    )
+                    wd = prev['weekday']
+                    if open_count is not None:
+                        if (
+                            slot not in open_count.index
+                            or wd not in open_count.columns
+                            or open_count.loc[slot, wd] == 0
+                        ):
+                            continue
+                    free_slots.append({'slot': slot, 'weekday': wd})
 
     if not free_slots:
         fallback = range(
@@ -528,22 +543,27 @@ def _gap_matrix(df: pd.DataFrame, slot_minutes: int) -> pd.DataFrame:
     return pivot.reindex(index=all_slots, columns=range(7), fill_value=0)
 
 
-def _score_matrix(
+def _score_matrix(  # pylint: disable=too-many-locals
         df_all: pd.DataFrame,
         n_weeks: int,
+        open_count: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Calcule le score composite d'attractivité [0-1] par (start_slot, weekday).
 
     Le score agrège trois composantes normalisées entre 0 et 1 :
-      - fill_score   : taux de remplissage moyen par semaine.
+      - fill_score   : taux de remplissage moyen par semaine. Si open_count
+                       est fourni, le dénominateur est le nombre de semaines
+                       où ce créneau était ouvert (plus précis).
       - lead_score   : lead time moyen (réservation anticipée = forte demande).
                        Absent si created_at non disponible dans les données.
       - reliability  : 1 - taux d'annulation.
-    Les créneaux sans aucune donnée ont un score de 0.
+    Les créneaux sans aucune donnée (ou jamais ouverts) ont un score de 0.
 
     Args:
         df_all: DataFrame complet (confirmés + annulés).
-        n_weeks: Nombre de semaines de la période analysée.
+        n_weeks: Nombre de semaines de la période (fallback si open_count absent).
+        open_count: DataFrame (slot × weekday) issu de _open_count_matrix,
+            ou None pour utiliser n_weeks comme dénominateur global.
 
     Returns:
         DataFrame pivot (start_slot × weekday 0-6) de scores [0-1].
@@ -559,7 +579,15 @@ def _score_matrix(
     total_matrix = total_matrix.reindex(index=all_idx, columns=range(7), fill_value=0)
     cancel_matrix = cancel_matrix.reindex(index=all_idx, columns=range(7), fill_value=0)
 
-    fill_rate = fill_matrix / n_weeks
+    if open_count is not None:
+        denom = (
+            open_count
+            .reindex(index=all_idx, columns=range(7), fill_value=0)
+            .replace(0, float('nan'))
+        )
+        fill_rate = fill_matrix.div(denom).fillna(0)
+    else:
+        fill_rate = fill_matrix / n_weeks
     fill_max = fill_rate.values.max()
     fill_norm = fill_rate / fill_max if fill_max > 0 else fill_rate
 
@@ -639,7 +667,7 @@ def plot_monthly_heatmap(
     """
     matrix = _monthly_matrix(df)
 
-    fig, ax = plt.subplots(figsize=(18, 2.5))
+    _, ax = plt.subplots(figsize=(18, 2.5))
     sns.heatmap(
         matrix,
         ax=ax,
@@ -673,19 +701,35 @@ def plot_weekly_heatmap(
         title_suffix: str,
         output_path: str,
         slot_minutes: int,
+        open_count: pd.DataFrame | None = None,
 ) -> None:
     """Génère et sauvegarde la heatmap hebdomadaire (créneaux × jours).
+
+    Si open_count est fourni, les créneaux jamais ouverts sur la période
+    sont grisés.
 
     Args:
         df: DataFrame issu de _parse_appointments.
         title_suffix: Suffixe ajouté au titre.
         output_path: Chemin complet du fichier PNG de sortie.
         slot_minutes: Résolution des créneaux en minutes (pour les labels).
+        open_count: DataFrame (slot × weekday) issu de _open_count_matrix,
+            ou None pour ne pas masquer.
     """
     matrix = _weekly_matrix(df, slot_minutes)
+
+    closed_mask = None
+    if open_count is not None:
+        oc = open_count.reindex(
+            index=matrix.index, columns=range(7), fill_value=0
+        )
+        closed_mask = oc == 0
+
     y_labels = [_slot_label(i, slot_minutes) for i in matrix.index]
 
-    fig, ax = plt.subplots(figsize=(10, max(6, len(y_labels) * 0.4)))
+    _, ax = plt.subplots(figsize=(10, max(6, len(y_labels) * 0.4)))
+    if closed_mask is not None:
+        ax.set_facecolor('#d8d8d8')
     sns.heatmap(
         matrix,
         ax=ax,
@@ -697,6 +741,7 @@ def plot_weekly_heatmap(
         cbar_kws={'label': 'Nombre de RDVs'},
         xticklabels=_DAYS_FR,
         yticklabels=y_labels,
+        mask=closed_mask,
     )
     ax.set_title(
         f'Fréquence des RDVs par créneau horaire{title_suffix}',
@@ -720,23 +765,27 @@ def plot_gap_heatmap(
         title_suffix: str,
         output_path: str,
         slot_minutes: int,
+        open_count: pd.DataFrame | None = None,
 ) -> None:
     """Génère la heatmap des créneaux libres (trous entre RDVs).
 
     Chaque cellule indique combien de fois ce créneau horaire était un trou
     dans la journée (entre deux RDVs). Les zones chaudes signalent des plages
     structurellement sous-exploitées.
+    Si open_count est fourni, les gaps hors créneaux ouverts sont filtrés.
 
     Args:
         df: DataFrame de RDVs confirmés.
         title_suffix: Suffixe ajouté au titre.
         output_path: Chemin complet du fichier PNG de sortie.
         slot_minutes: Résolution des créneaux en minutes.
+        open_count: DataFrame (slot × weekday) issu de _open_count_matrix,
+            ou None pour ne pas filtrer.
     """
-    matrix = _gap_matrix(df, slot_minutes)
+    matrix = _gap_matrix(df, slot_minutes, open_count)
     y_labels = [_slot_label(i, slot_minutes) for i in matrix.index]
 
-    fig, ax = plt.subplots(figsize=(10, max(6, len(y_labels) * 0.4)))
+    _, ax = plt.subplots(figsize=(10, max(6, len(y_labels) * 0.4)))
     sns.heatmap(
         matrix,
         ax=ax,
@@ -766,6 +815,101 @@ def plot_gap_heatmap(
     )
 
 
+def plot_occupancy_heatmap(
+        df_conf: pd.DataFrame,
+        open_count: pd.DataFrame,
+        title_suffix: str,
+        output_path: str,
+        slot_minutes: int,
+) -> None:
+    """Heatmap du taux d'occupation des créneaux ouverts.
+
+    Chaque cellule affiche le taux de remplissage moyen du créneau :
+    nb_rdvs / nb_semaines_ouvertes. Le dénominateur est historique : si un
+    créneau n'était ouvert que 6 semaines sur 12, la division se fait sur 6.
+    Les créneaux jamais ouverts sur la période apparaissent en gris.
+
+    Args:
+        df_conf: DataFrame des RDVs confirmés issu de _parse_appointments.
+        open_count: DataFrame (slot × weekday 0-6) issu de _open_count_matrix,
+            contenant le nombre de semaines où chaque créneau était ouvert.
+        title_suffix: Suffixe ajouté au titre.
+        output_path: Chemin complet du fichier PNG de sortie.
+        slot_minutes: Résolution des créneaux en minutes.
+    """
+    if open_count.empty:
+        print(
+            f'  {_ANSI_RED}Occupation : aucune période d\'ouverture '
+            f'disponible.{_ANSI_RESET}'
+        )
+        return
+
+    slot_min = int(open_count.index.min())
+    slot_max = int(open_count.index.max())
+    if not df_conf.empty:
+        slot_min = min(slot_min, int(df_conf['start_slot'].min()))
+        slot_max = max(slot_max, int(df_conf['start_slot'].max()))
+
+    fill_matrix = _start_slot_matrix(df_conf)
+    open_full = open_count.reindex(
+        index=range(slot_min, slot_max + 1),
+        columns=range(7),
+        fill_value=0,
+    )
+
+    rows = {}
+    for slot in range(slot_min, slot_max + 1):
+        row = {}
+        for wd in range(7):
+            n_open = int(open_full.loc[slot, wd])
+            if n_open > 0:
+                count = (
+                    int(fill_matrix.loc[slot, wd])
+                    if slot in fill_matrix.index and wd in fill_matrix.columns
+                    else 0
+                )
+                row[wd] = count / n_open
+            else:
+                row[wd] = float('nan')
+        rows[slot] = row
+
+    matrix = pd.DataFrame(rows).T
+    matrix.columns = range(7)
+
+    y_labels = [_slot_label(i, slot_minutes) for i in matrix.index]
+
+    _, ax = plt.subplots(figsize=(10, max(6, len(y_labels) * 0.4)))
+    ax.set_facecolor('#d8d8d8')
+    sns.heatmap(
+        matrix,
+        ax=ax,
+        cmap='YlOrRd',
+        annot=True,
+        fmt='.2f',
+        linewidths=0.5,
+        linecolor='white',
+        vmin=0,
+        cbar_kws={'label': 'Taux de remplissage (RDVs / semaines ouvertes)'},
+        xticklabels=_DAYS_FR,
+        yticklabels=y_labels,
+        mask=matrix.isna(),
+    )
+    ax.set_title(
+        f"Taux d'occupation des créneaux ouverts{title_suffix}",
+        fontsize=13,
+        pad=10,
+    )
+    ax.set_xlabel('Jour de la semaine', fontsize=11)
+    ax.set_ylabel('Créneau horaire', fontsize=11)
+    ax.tick_params(axis='both', labelsize=9)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(
+        f'  {_ANSI_GREEN}Occupation sauvegardée : {output_path}{_ANSI_RESET}'
+    )
+
+
 def plot_trend(
         df_all: pd.DataFrame,
         title_suffix: str,
@@ -788,7 +932,7 @@ def plot_trend(
         if col not in weekly.columns:
             weekly[col] = 0
 
-    fig, ax = plt.subplots(figsize=(max(10, len(weekly) * 0.7), 5))
+    _, ax = plt.subplots(figsize=(max(10, len(weekly) * 0.7), 5))
     weekly['Confirmés'].plot(
         kind='bar', ax=ax, color='steelblue', label='Confirmés', width=0.6,
     )
@@ -819,20 +963,24 @@ def plot_score_heatmap(
         output_path: str,
         slot_minutes: int,
         n_weeks: int,
+        open_count: pd.DataFrame | None = None,
 ) -> None:
     """Génère la heatmap de score composite d'attractivité des créneaux.
 
     Vert = créneau attractif (fort remplissage, forte anticipation, peu
     d'annulations). Rouge = créneau peu attractif ou sans données.
+    Les créneaux jamais ouverts sont grisés si open_count est fourni.
 
     Args:
         df_all: DataFrame complet (confirmés + annulés).
         title_suffix: Suffixe ajouté au titre.
         output_path: Chemin complet du fichier PNG de sortie.
         slot_minutes: Résolution des créneaux en minutes.
-        n_weeks: Nombre de semaines analysées (pour le taux de remplissage).
+        n_weeks: Nombre de semaines analysées (fallback si open_count absent).
+        open_count: DataFrame (slot × weekday) issu de _open_count_matrix,
+            ou None pour utiliser n_weeks comme dénominateur global.
     """
-    matrix = _score_matrix(df_all, n_weeks)
+    matrix = _score_matrix(df_all, n_weeks, open_count)
     if matrix.empty:
         print(
             f'  {_ANSI_RED}Score : données insuffisantes.{_ANSI_RESET}'
@@ -841,9 +989,19 @@ def plot_score_heatmap(
 
     all_slots = range(matrix.index.min(), matrix.index.max() + 1)
     matrix = matrix.reindex(index=all_slots, columns=range(7), fill_value=0)
+
+    closed_mask = None
+    if open_count is not None:
+        oc = open_count.reindex(
+            index=all_slots, columns=range(7), fill_value=0
+        )
+        closed_mask = oc == 0
+
     y_labels = [_slot_label(i, slot_minutes) for i in matrix.index]
 
-    fig, ax = plt.subplots(figsize=(10, max(6, len(y_labels) * 0.4)))
+    _, ax = plt.subplots(figsize=(10, max(6, len(y_labels) * 0.4)))
+    if closed_mask is not None:
+        ax.set_facecolor('#d8d8d8')
     sns.heatmap(
         matrix,
         ax=ax,
@@ -857,6 +1015,7 @@ def plot_score_heatmap(
         cbar_kws={'label': 'Score (0 = faible, 1 = optimal)'},
         xticklabels=_DAYS_FR,
         yticklabels=y_labels,
+        mask=closed_mask,
     )
     ax.set_title(
         f"Score d'attractivité des créneaux{title_suffix}",
@@ -874,93 +1033,101 @@ def plot_score_heatmap(
     )
 
 
-def simulate_slot(
-        df_conf: pd.DataFrame,
+def _compute_slot_stats(
+        fill_matrix: pd.DataFrame,
         weekday: int,
         slot: int,
         n_past: int,
-        n_future: int,
-        output_path: str,
-        slot_minutes: int,
-) -> None:
-    """Simule l'ouverture d'un créneau et projette les RDVs attendus.
+        open_count: pd.DataFrame | None = None,
+) -> tuple[int, float, str]:
+    """Calcule les statistiques historiques pour un créneau cible.
 
-    Si le créneau a des données historiques, la projection est directe.
-    Sinon, une estimation est faite à partir des créneaux voisins (±1 et ±2
-    slots, même jour de semaine).
+    Si open_count est fourni, le dénominateur est le nombre de semaines où
+    ce créneau était ouvert (plus précis que n_past global).
 
     Args:
-        df_conf: DataFrame de RDVs confirmés.
+        fill_matrix: Matrice (start_slot × weekday) des RDVs confirmés.
         weekday: Jour de semaine cible (0=Lun, ..., 6=Dim).
         slot: Index de créneau cible.
-        n_past: Nombre de semaines dans la période historique.
-        n_future: Nombre de semaines futures à projeter.
-        output_path: Chemin complet du fichier PNG de sortie.
-        slot_minutes: Résolution des créneaux en minutes.
+        n_past: Nombre de semaines historiques (fallback si open_count absent).
+        open_count: DataFrame (slot × weekday) issu de _open_count_matrix,
+            ou None.
+
+    Returns:
+        Tuple (actual_count, avg_per_week, confidence).
     """
-    fill_matrix = _start_slot_matrix(df_conf)
-    day_name = _DAYS_FR[weekday]
-    slot_time = _slot_label(slot, slot_minutes)
+    def _denom(s: int, wd: int) -> int:
+        if open_count is not None:
+            if s in open_count.index and wd in open_count.columns:
+                n = int(open_count.loc[s, wd])
+                return n if n > 0 else n_past
+        return n_past
 
     has_data = (
         slot in fill_matrix.index
         and weekday in fill_matrix.columns
         and fill_matrix.loc[slot, weekday] > 0
     )
-
     if has_data:
         actual_count = int(fill_matrix.loc[slot, weekday])
-        avg_per_week = actual_count / n_past
-        confidence = 'élevée (données historiques directes)'
-    else:
-        actual_count = 0
-        neighbors = [
-            int(fill_matrix.loc[s, weekday])
-            for delta in [-2, -1, 1, 2]
-            if (s := slot + delta) in fill_matrix.index
-            and weekday in fill_matrix.columns
-        ]
-        avg_per_week = (sum(neighbors) / len(neighbors) / n_past) if neighbors else 0
-        confidence = (
-            'estimée par interpolation (voisins ±2 créneaux)'
-            if neighbors
-            else 'indéterminée (aucune donnée dans ce secteur)'
+        return (
+            actual_count,
+            actual_count / _denom(slot, weekday),
+            'élevée (données historiques directes)',
         )
 
-    projected = avg_per_week * n_future
-
-    print(f'\n  {_ANSI_BLUE}Simulation — {day_name} {slot_time}{_ANSI_RESET}')
-    print(
-        f'  Historique  : {actual_count} RDVs sur {n_past} semaines '
-        f'({avg_per_week:.2f}/sem)'
-    )
-    print(
-        f'  Projection  : ~{projected:.0f} RDVs sur {n_future} semaine(s)'
-    )
-    print(f'  Confiance   : {confidence}')
-
-    # Graphique contextuel : tous les créneaux du jour ciblé.
-    if weekday in fill_matrix.columns:
-        col_data = fill_matrix[weekday].copy()
+    neighbors = [
+        int(fill_matrix.loc[s, weekday])
+        for delta in [-2, -1, 1, 2]
+        if (s := slot + delta) in fill_matrix.index
+        and weekday in fill_matrix.columns
+    ]
+    if neighbors:
+        avg = sum(
+            n / _denom(slot + delta, weekday)
+            for delta, n in zip([-2, -1, 1, 2], neighbors)
+        ) / len(neighbors)
+        confidence = 'estimée par interpolation (voisins ±2 créneaux)'
     else:
-        col_data = pd.Series({slot: 0}, dtype=int)
+        avg = 0.0
+        confidence = 'indéterminée (aucune donnée dans ce secteur)'
+    return 0, avg, confidence
 
+
+def _save_simulation_chart(  # pylint: disable=too-many-locals
+        fill_matrix: pd.DataFrame,
+        target: tuple[int, int],
+        projection: tuple[int, float, float],
+        slot_minutes: int,
+        output_path: str,
+) -> None:
+    """Génère et sauvegarde le graphique contextuel de simulation.
+
+    Args:
+        fill_matrix: Matrice (start_slot × weekday) des RDVs confirmés.
+        target: Tuple (weekday, slot).
+        projection: Tuple (n_future, avg_per_week, projected).
+        slot_minutes: Résolution des créneaux en minutes.
+        output_path: Chemin complet du fichier PNG de sortie.
+    """
+    weekday, slot = target
+    n_future, avg_per_week, projected = projection
+    day_name = _DAYS_FR[weekday]
+    slot_time = _slot_label(slot, slot_minutes)
+
+    col_data = fill_matrix[weekday].copy() if weekday in fill_matrix.columns \
+        else pd.Series({slot: 0}, dtype=int)
     if slot not in col_data.index:
         col_data.loc[slot] = 0
     col_data = col_data.sort_index()
 
     colors = ['tomato' if i == slot else 'steelblue' for i in col_data.index]
-    y_labels_sim = [_slot_label(i, slot_minutes) for i in col_data.index]
+    y_labels = [_slot_label(i, slot_minutes) for i in col_data.index]
 
-    fig, ax = plt.subplots(figsize=(6, max(4, len(col_data) * 0.35)))
-    ax.barh(
-        range(len(col_data)),
-        col_data.values,
-        color=colors,
-        edgecolor='white',
-    )
+    _, ax = plt.subplots(figsize=(6, max(4, len(col_data) * 0.35)))
+    ax.barh(range(len(col_data)), col_data.values, color=colors, edgecolor='white')
     ax.set_yticks(range(len(col_data)))
-    ax.set_yticklabels(y_labels_sim, fontsize=9)
+    ax.set_yticklabels(y_labels, fontsize=9)
     ax.invert_yaxis()
     ax.set_title(
         f'Simulation ouverture {day_name} {slot_time}\n'
@@ -972,8 +1139,54 @@ def simulate_slot(
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(
-        f'  {_ANSI_GREEN}Simulation sauvegardée : {output_path}{_ANSI_RESET}'
+    print(f'  {_ANSI_GREEN}Simulation sauvegardée : {output_path}{_ANSI_RESET}')
+
+
+def simulate_slot(  # pylint: disable=too-many-locals
+        df_conf: pd.DataFrame,
+        target: tuple[int, int],
+        weeks: tuple[int, int],
+        output_path: str,
+        slot_minutes: int,
+        open_count: pd.DataFrame | None = None,
+) -> None:
+    """Simule l'ouverture d'un créneau et projette les RDVs attendus.
+
+    Si le créneau a des données historiques, la projection est directe.
+    Sinon, une estimation est faite à partir des créneaux voisins (±1 et ±2
+    slots, même jour de semaine).
+    Si open_count est fourni, le dénominateur est le nombre de semaines où
+    ce créneau était ouvert.
+
+    Args:
+        df_conf: DataFrame de RDVs confirmés.
+        target: Tuple (weekday, slot) — jour (0=Lun..6=Dim) et index de
+            créneau cible.
+        weeks: Tuple (n_past, n_future) — nombre de semaines historiques et
+            futures à projeter.
+        output_path: Chemin complet du fichier PNG de sortie.
+        slot_minutes: Résolution des créneaux en minutes.
+        open_count: DataFrame (slot × weekday) issu de _open_count_matrix,
+            ou None pour utiliser n_past comme dénominateur global.
+    """
+    weekday, slot = target
+    n_past, n_future = weeks
+    fill_matrix = _start_slot_matrix(df_conf)
+    day_name = _DAYS_FR[weekday]
+    slot_time = _slot_label(slot, slot_minutes)
+
+    actual_count, avg_per_week, confidence = _compute_slot_stats(
+        fill_matrix, weekday, slot, n_past, open_count
+    )
+    projected = avg_per_week * n_future
+
+    print(f'\n  {_ANSI_BLUE}Simulation — {day_name} {slot_time}{_ANSI_RESET}')
+    print(f'  Historique  : {actual_count} RDVs sur {n_past} semaines ({avg_per_week:.2f}/sem)')
+    print(f'  Projection  : ~{projected:.0f} RDVs sur {n_future} semaine(s)')
+    print(f'  Confiance   : {confidence}')
+
+    _save_simulation_chart(
+        fill_matrix, target, (n_future, avg_per_week, projected), slot_minutes, output_path
     )
 
 
@@ -981,16 +1194,20 @@ def plot_fill_forecast(
         df_future: pd.DataFrame,
         hist_avg: float,
         output_path: str,
+        open_slots_by_week: dict[str, int] | None = None,
 ) -> None:
     """Taux de remplissage prévisionnel : RDVs confirmés par semaine future.
 
     Compare le nombre de RDVs déjà réservés à la moyenne historique.
-    Rouge : <80 % | Orange : 80–100 % | Bleu : ≥ 100 %.
+    Si open_slots_by_week est fourni, affiche aussi la capacité ouverte par
+    semaine (créneaux disponibles) et annote le taux réel booked/open.
+    Rouge : <80 % | Orange : 80–100 % | Bleu : ≥ 100 % (base : hist_avg).
 
     Args:
         df_future: DataFrame des RDVs futurs issus de _parse_appointments.
         hist_avg: Moyenne historique de RDVs confirmés par semaine.
         output_path: Chemin complet du fichier PNG de sortie.
+        open_slots_by_week: {week_start: nb_créneaux_ouverts} ou None.
     """
     df_conf = df_future[~df_future['cancelled']]
     if df_conf.empty:
@@ -1007,23 +1224,44 @@ def plot_fill_forecast(
         for p in pcts.values
     ]
 
-    fig, ax = plt.subplots(figsize=(max(8, len(weekly) * 1.5), 5))
+    _, ax = plt.subplots(figsize=(max(8, len(weekly) * 1.5), 5))
+
+    if open_slots_by_week:
+        open_vals = [
+            open_slots_by_week.get(ws, 0) for ws in weekly.index
+        ]
+        ax.bar(
+            range(len(weekly)), open_vals,
+            color='#e0e0e0', edgecolor='white', width=0.6,
+            label='Créneaux ouverts',
+        )
+
     bars = ax.bar(
         range(len(weekly)), weekly.values,
         color=colors, edgecolor='white', width=0.6,
+        label='RDVs confirmés',
     )
     if hist_avg > 0:
         ax.axhline(
             hist_avg, color='gray', linestyle='--', linewidth=1.2,
             label=f'Moyenne historique ({hist_avg:.1f} RDVs/sem)',
         )
-    for bar, pct in zip(bars, pcts.values):
+
+    for i, (rect, pct, ws) in enumerate(
+        zip(bars, pcts.values, weekly.index)
+    ):
+        label = f'{pct:.0f}%'
+        if open_slots_by_week:
+            n_open = open_slots_by_week.get(ws, 0)
+            if n_open > 0:
+                label += f'\n({weekly.iloc[i]/n_open*100:.0f}% cap.)'
         ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.1,
-            f'{pct:.0f}%',
-            ha='center', va='bottom', fontsize=9,
+            rect.get_x() + rect.get_width() / 2,
+            rect.get_height() + 0.1,
+            label,
+            ha='center', va='bottom', fontsize=8,
         )
+
     ax.set_title(
         'Taux de remplissage prévisionnel (semaines à venir)',
         fontsize=13, pad=10,
@@ -1032,8 +1270,7 @@ def plot_fill_forecast(
     ax.set_ylabel('RDVs confirmés', fontsize=11)
     ax.set_xticks(range(len(weekly)))
     ax.set_xticklabels(weekly.index, rotation=45, ha='right', fontsize=9)
-    if hist_avg > 0:
-        ax.legend(fontsize=10)
+    ax.legend(fontsize=10)
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -1088,7 +1325,7 @@ def plot_cancel_risk_forecast(
     risk = risk.reindex(index=all_slots, columns=range(7))
     y_labels = [_slot_label(i, slot_minutes) for i in risk.index]
 
-    fig, ax = plt.subplots(figsize=(10, max(6, len(y_labels) * 0.4)))
+    _, ax = plt.subplots(figsize=(10, max(6, len(y_labels) * 0.4)))
     sns.heatmap(
         risk,
         ax=ax,
@@ -1153,15 +1390,15 @@ def plot_charge_glissante(
         for w in all_weeks
     ]
 
-    fig, ax = plt.subplots(figsize=(max(10, len(all_weeks) * 0.9), 5))
+    _, ax = plt.subplots(figsize=(max(10, len(all_weeks) * 0.9), 5))
     bars = ax.bar(
         range(len(all_weeks)), counts,
         color=colors, edgecolor='white', width=0.7,
     )
-    for bar, val in zip(bars, counts):
+    for rect, val in zip(bars, counts):
         ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.1,
+            rect.get_x() + rect.get_width() / 2,
+            rect.get_height() + 0.1,
             str(val),
             ha='center', va='bottom', fontsize=8,
         )
@@ -1238,7 +1475,7 @@ def plot_carnet_projection(
         )
     )
 
-    fig, ax = plt.subplots(figsize=(max(8, len(proj) * 1.5), 5))
+    _, ax = plt.subplots(figsize=(max(8, len(proj) * 1.5), 5))
     x = range(len(proj))
     ax.bar(x, proj['booked'], color='lightsteelblue', label='RDVs réservés', width=0.6)
     ax.bar(x, proj['expected'], color='steelblue', label='RDVs attendus (proj.)', width=0.6)
@@ -1271,6 +1508,7 @@ def _generate_pair(
         prefix: str,
         output_dir: str,
         slot_minutes: int,
+        open_count: pd.DataFrame | None = None,
 ) -> None:
     """Génère les deux heatmaps (mensuelle + hebdomadaire) pour un sous-ensemble.
 
@@ -1280,6 +1518,8 @@ def _generate_pair(
         prefix: Préfixe des noms de fichiers.
         output_dir: Répertoire de sortie.
         slot_minutes: Résolution des créneaux en minutes.
+        open_count: DataFrame (slot × weekday) issu de _open_count_matrix,
+            ou None pour ne pas masquer les créneaux fermés.
     """
     plot_monthly_heatmap(
         df, label,
@@ -1289,6 +1529,7 @@ def _generate_pair(
         df, label,
         os.path.join(output_dir, f'heatmap_weekly_{prefix}.png'),
         slot_minutes,
+        open_count,
     )
 
 
@@ -1353,8 +1594,8 @@ def _parse_time_to_slot(time_str: str, slot_minutes: int) -> int:
 # Point d'entrée
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    """Point d'entrée principal du script d'analyse heatmap."""
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Construit et retourne le parser d'arguments CLI."""
     parser = argparse.ArgumentParser(
         description=(
             'Génère des analyses visuelles des RDVs Doctolib '
@@ -1439,6 +1680,15 @@ def main() -> None:
         help='Nombre de semaines futures pour la projection (défaut: 4).',
     )
     parser.add_argument(
+        '--open-periods',
+        action='store_true',
+        dest='open_periods',
+        help=(
+            'Récupère les périodes d\'ouverture de la semaine courante et '
+            'génère la heatmap de taux d\'occupation (créneaux fermés grisés).'
+        ),
+    )
+    parser.add_argument(
         '--forecast',
         action='store_true',
         help=(
@@ -1457,7 +1707,160 @@ def main() -> None:
             '(semaine courante incluse, défaut: 4).'
         ),
     )
-    args = parser.parse_args()
+    return parser
+
+
+def _run_analyses(
+        args: argparse.Namespace,
+        df_all: pd.DataFrame,
+        df_conf: pd.DataFrame,
+        period_label: str,
+        open_count: pd.DataFrame | None = None,
+) -> None:
+    """Génère les heatmaps et analyses optionnelles (gaps, trend, score, simulate).
+
+    Args:
+        args: Arguments CLI parsés.
+        df_all: DataFrame complet (confirmés + annulés).
+        df_conf: DataFrame des RDVs confirmés uniquement.
+        period_label: Libellé de la période pour les titres de graphiques.
+        open_count: DataFrame (slot × weekday) issu de _open_count_matrix,
+            ou None si --open-periods n'est pas activé.
+    """
+    for rdv_type in args.rdv_types:
+        label_suffix, prefix = _RDV_TYPES[rdv_type]
+        subset = _filter_by_type(df_all, rdv_type)
+        _generate_pair(
+            subset, label_suffix + period_label, prefix,
+            args.output, args.resolution, open_count,
+        )
+
+    if args.gaps:
+        plot_gap_heatmap(
+            df_conf, period_label,
+            os.path.join(args.output, 'heatmap_gaps.png'),
+            args.resolution, open_count,
+        )
+    if args.trend:
+        plot_trend(df_all, period_label, os.path.join(args.output, 'trend.png'))
+    if args.score:
+        plot_score_heatmap(
+            df_all, period_label,
+            os.path.join(args.output, 'heatmap_score.png'),
+            args.resolution, args.weeks, open_count,
+        )
+    if args.simulate:
+        weekday = _parse_weekday(args.simulate[0])
+        slot = _parse_time_to_slot(args.simulate[1], args.resolution)
+        day_str = _DAYS_FR[weekday]
+        time_str = args.simulate[1].replace(':', 'h')
+        simulate_slot(
+            df_conf,
+            (weekday, slot),
+            (args.weeks, args.simulate_weeks),
+            os.path.join(args.output, f'simulation_{day_str.lower()}_{time_str}.png'),
+            args.resolution,
+            open_count,
+        )
+    if open_count is not None:
+        plot_occupancy_heatmap(
+            df_conf, open_count,
+            period_label,
+            os.path.join(args.output, 'heatmap_occupation.png'),
+            args.resolution,
+        )
+
+
+def _run_forecast(
+        args: argparse.Namespace,
+        df_all: pd.DataFrame,
+        df_conf: pd.DataFrame,
+        cache_path: str | None,
+        config: dict[str, Any],
+        cookies: Any,
+) -> None:
+    """Génère les analyses prévisionnelles depuis les semaines futures du cache.
+
+    Les périodes d'ouverture des semaines futures sont toujours récupérées
+    sans cache (elles peuvent changer suite à des fermetures ponctuelles).
+
+    Args:
+        args: Arguments CLI parsés.
+        df_all: DataFrame historique complet (confirmés + annulés).
+        df_conf: DataFrame historique des RDVs confirmés uniquement.
+        cache_path: Chemin du cache JSON RDVs, ou None si cache désactivé.
+        config: Configuration globale du script.
+        cookies: Cookies d'authentification Doctolib.
+    """
+    print(
+        f'\n{_ANSI_BLUE}Analyses prévisionnelles '
+        f'({args.forecast_weeks} semaine(s) futures)...{_ANSI_RESET}'
+    )
+    future_rdvs, future_weeks = load_future_from_cache(cache_path, args.forecast_weeks)
+    if not future_rdvs:
+        print(
+            f'  {_ANSI_RED}Aucune donnée future dans le cache. '
+            f'Lancez doctosync.py pour alimenter le cache.{_ANSI_RESET}'
+        )
+        return
+
+    print(f'  Semaines chargées : {", ".join(future_weeks)}')
+    df_future = _parse_appointments(future_rdvs, args.resolution)
+    cancel_rate = _cancel_rate_matrix(df_all)
+    hist_avg = len(df_conf) / args.weeks
+
+    # Périodes d'ouverture futures : fetch sans cache (données volatiles).
+    open_slots_by_week: dict[str, int] | None = None
+    print(
+        f'  {_ANSI_BLUE}Récupération des périodes d\'ouverture futures '
+        f'(sans cache)...{_ANSI_RESET}'
+    )
+    open_slots_by_week = {}
+    for ws in future_weeks:
+        try:
+            events = fetch_recurring_events(config, ws, cookies)
+            periods = _parse_open_periods(events, args.resolution)
+            open_slots_by_week[ws] = sum(len(s) for s in periods.values())
+        except requests.HTTPError as e:
+            print(
+                f'    {_ANSI_RED}Erreur périodes {ws}: {e}{_ANSI_RESET}'
+            )
+            if e.response is not None and e.response.status_code == 401:
+                print(
+                    f'    {_ANSI_RED}Session expirée (401) — '
+                    f'périodes d\'ouverture ignorées.{_ANSI_RESET}'
+                )
+                open_slots_by_week = None
+                break
+            open_slots_by_week[ws] = 0
+        except requests.RequestException as e:
+            print(
+                f'    {_ANSI_RED}Erreur périodes {ws}: {e}{_ANSI_RESET}'
+            )
+            open_slots_by_week[ws] = 0
+    if open_slots_by_week is not None and not any(open_slots_by_week.values()):
+        open_slots_by_week = None
+
+    plot_fill_forecast(
+        df_future, hist_avg,
+        os.path.join(args.output, 'forecast_remplissage.png'),
+        open_slots_by_week,
+    )
+    plot_cancel_risk_forecast(
+        df_future, cancel_rate,
+        os.path.join(args.output, 'forecast_risque_annulation.png'), args.resolution,
+    )
+    plot_charge_glissante(
+        df_all, df_future, os.path.join(args.output, 'forecast_charge_glissante.png')
+    )
+    plot_carnet_projection(
+        df_future, cancel_rate, os.path.join(args.output, 'forecast_carnet_projection.png')
+    )
+
+
+def main() -> None:
+    """Point d'entrée principal du script d'analyse heatmap."""
+    args = _build_arg_parser().parse_args()
 
     if args.resolution <= 0 or 60 % args.resolution != 0:
         sys.exit(
@@ -1506,104 +1909,33 @@ def main() -> None:
 
     os.makedirs(args.output, exist_ok=True)
 
-    # Heatmaps standard par type de RDV.
-    for rdv_type in args.rdv_types:
-        label_suffix, prefix = _RDV_TYPES[rdv_type]
-        subset = _filter_by_type(df_all, rdv_type)
-        _generate_pair(
-            subset,
-            label_suffix + period_label,
-            prefix,
-            args.output,
-            args.resolution,
+    open_count = None
+    if args.open_periods:
+        open_cache_path = None
+        if cache_path:
+            cache_dir = os.path.dirname(cache_path) or 'cache'
+            open_cache_path = os.path.join(
+                cache_dir, '.open_periods_cache.json'
+            )
+        print(
+            f'\n{_ANSI_BLUE}Récupération des périodes d\'ouverture '
+            f'({args.weeks} semaines)...{_ANSI_RESET}'
         )
+        events_by_week = fetch_all_open_periods(
+            config, cookies, week_starts, open_cache_path
+        )
+        open_count = _open_count_matrix(events_by_week, args.resolution)
+        if not open_count.empty:
+            n_open = int((open_count > 0).values.sum())
+            print(
+                f'  {n_open} créneaux-semaines ouverts '
+                f'sur {len(events_by_week)} semaine(s).'
+            )
 
-    # Analyses complémentaires.
-    if args.gaps:
-        plot_gap_heatmap(
-            df_conf,
-            period_label,
-            os.path.join(args.output, 'heatmap_gaps.png'),
-            args.resolution,
-        )
-
-    if args.trend:
-        plot_trend(
-            df_all,
-            period_label,
-            os.path.join(args.output, 'trend.png'),
-        )
-
-    if args.score:
-        plot_score_heatmap(
-            df_all,
-            period_label,
-            os.path.join(args.output, 'heatmap_score.png'),
-            args.resolution,
-            args.weeks,
-        )
-
-    if args.simulate:
-        weekday = _parse_weekday(args.simulate[0])
-        slot = _parse_time_to_slot(args.simulate[1], args.resolution)
-        day_str = _DAYS_FR[weekday]
-        time_str = args.simulate[1].replace(':', 'h')
-        simulate_slot(
-            df_conf,
-            weekday,
-            slot,
-            args.weeks,
-            args.simulate_weeks,
-            os.path.join(
-                args.output,
-                f'simulation_{day_str.lower()}_{time_str}.png',
-            ),
-            args.resolution,
-        )
+    _run_analyses(args, df_all, df_conf, period_label, open_count)
 
     if args.forecast:
-        print(
-            f'\n{_ANSI_BLUE}Analyses prévisionnelles '
-            f'({args.forecast_weeks} semaine(s) futures)...{_ANSI_RESET}'
-        )
-        future_rdvs, future_weeks = load_future_from_cache(
-            cache_path, args.forecast_weeks
-        )
-        if not future_rdvs:
-            print(
-                f'  {_ANSI_RED}Aucune donnée future dans le cache. '
-                f'Lancez doctosync.py pour alimenter le cache.{_ANSI_RESET}'
-            )
-        else:
-            print(
-                f'  Semaines chargées : '
-                f'{", ".join(future_weeks)}'
-            )
-            df_future = _parse_appointments(future_rdvs, args.resolution)
-            cancel_rate = _cancel_rate_matrix(df_all)
-            hist_avg = len(df_conf) / args.weeks
-
-            plot_fill_forecast(
-                df_future,
-                hist_avg,
-                os.path.join(args.output, 'forecast_remplissage.png'),
-            )
-            plot_cancel_risk_forecast(
-                df_future,
-                cancel_rate,
-                os.path.join(args.output, 'forecast_risque_annulation.png'),
-                args.resolution,
-            )
-            plot_charge_glissante(
-                df_all,
-                df_future,
-                os.path.join(args.output, 'forecast_charge_glissante.png'),
-            )
-            plot_carnet_projection(
-                df_future,
-                cancel_rate,
-                os.path.join(args.output, 'forecast_carnet_projection.png'),
-            )
+        _run_forecast(args, df_all, df_conf, cache_path, config, cookies)
 
 
 if __name__ == '__main__':

@@ -6,7 +6,7 @@ Scripts Python pour exploiter les données de rendez-vous Doctolib.
 |--------|------|
 | `doctosync.py` | Synchronise les RDVs Doctolib → Google Calendar et alimente le cache |
 | `docto_heatmap.py` | Analyse les semaines passées et génère des analyses prévisionnelles |
-| `cache_utils.py` | Module partagé de gestion du cache (lecture/écriture JSON versionné) |
+| `docto_common.py` | Module partagé : cache, cookies, fetch RDVs et périodes d'ouverture |
 
 ## Prérequis
 
@@ -104,8 +104,11 @@ python docto_heatmap.py --simulate lun 09:00 --simulate-weeks 4
 # Analyses prévisionnelles sur les 4 prochaines semaines (depuis le cache)
 python docto_heatmap.py --forecast --forecast-weeks 4
 
+# Taux d'occupation sur créneaux ouverts (masque les créneaux fermés)
+python docto_heatmap.py -w 12 --open-periods
+
 # Tout en une commande
-python docto_heatmap.py -w 12 --type all new --gaps --trend --score --forecast
+python docto_heatmap.py -w 12 --type all new --gaps --trend --score --open-periods --forecast
 ```
 
 ### Options
@@ -124,6 +127,7 @@ python docto_heatmap.py -w 12 --type all new --gaps --trend --score --forecast
 | `--score` | — | Heatmap du score composite d'attractivité des créneaux |
 | `--simulate JOUR HEURE` | — | Simule l'ouverture d'un créneau (ex: `lun 09:00`) |
 | `--simulate-weeks N` | `4` | Semaines futures projetées pour la simulation |
+| `--open-periods` | — | Récupère les périodes d'ouverture historiques et enrichit toutes les analyses (masque les créneaux fermés, dénominateur exact pour les taux) |
 | `--forecast` | — | Active les 4 analyses prévisionnelles (nécessite le cache) |
 | `--forecast-weeks N` | `4` | Nombre de semaines futures à charger depuis le cache |
 
@@ -133,7 +137,8 @@ Le cache `cache/.heatmap_cache.json` est **alimenté par `doctosync.py`** à cha
 
 - Les données des semaines passées ne changent pas : elles sont servies depuis le cache sans appel API.
 - Les données des semaines futures proviennent du cache peuplé par la dernière synchro `doctosync.py`.
-- En cas de changement de format, le numéro de version est incrémenté dans `cache_utils.py` et un re-fetch complet est déclenché.
+- En cas de changement de format, le numéro de version est incrémenté dans `docto_common.py` et un re-fetch complet est déclenché.
+- Les périodes d'ouverture historiques (`--open-periods`) sont mises en cache dans `cache/.open_periods_cache.json`. Les périodes futures (utilisées par `--forecast`) sont **toujours re-fetchées sans cache** car elles peuvent changer suite à des fermetures ponctuelles.
 
 ### Fichiers générés
 
@@ -149,12 +154,13 @@ Le cache `cache/.heatmap_cache.json` est **alimenté par `doctosync.py`** à cha
 | `--trend` | `trend.png` |
 | `--score` | `heatmap_score.png` |
 | `--simulate lun 09:00` | `simulation_lun_09h00.png` |
+| `--open-periods` | `heatmap_occupation.png` (taux d'occupation sur créneaux ouverts) |
 
 **Analyses prévisionnelles (`--forecast`)**
 
 | Fichier | Description |
 |---------|-------------|
-| `forecast_remplissage.png` | RDVs réservés par semaine future vs moyenne historique |
+| `forecast_remplissage.png` | RDVs réservés par semaine future vs moyenne historique ; avec `--open-periods`, affiche aussi la capacité ouverte et le taux booked/open |
 | `forecast_risque_annulation.png` | Heatmap du risque d'annulation par créneau (taux historique × réservations futures) |
 | `forecast_charge_glissante.png` | Vue unifiée passé + semaine courante + futur en un seul graphe |
 | `forecast_carnet_projection.png` | Projection Bernoulli des RDVs maintenus avec bande d'incertitude ±1σ |
@@ -181,16 +187,18 @@ doctosync.py (synchro quotidienne / hebdomadaire)
 
 ```
 DoctoSync/
-├── doctosync.py          # Synchronisation Doctolib → Google Calendar
-├── docto_heatmap.py      # Analyses heatmaps + prévisions
-├── cache_utils.py        # Module partagé : load_cache / save_cache
+├── doctosync.py              # Synchronisation Doctolib → Google Calendar
+├── docto_heatmap.py          # Analyses heatmaps + prévisions
+├── docto_common.py           # Module partagé : cache, cookies, fetch API
 ├── requirements.txt
 ├── config/
 │   ├── config.yaml.example
-│   ├── config.yaml       # (ignoré par git)
-│   ├── cookies.txt       # (ignoré par git)
-│   ├── credentials.json  # (ignoré par git)
-│   └── token.json        # (ignoré par git)
-├── cache/                # Cache partagé des données Doctolib (ignoré par git)
+│   ├── config.yaml           # (ignoré par git)
+│   ├── cookies.txt           # (ignoré par git)
+│   ├── credentials.json      # (ignoré par git)
+│   └── token.json            # (ignoré par git)
+├── cache/
+│   ├── .heatmap_cache.json        # Cache RDVs partagé (ignoré par git)
+│   └── .open_periods_cache.json   # Cache périodes d'ouverture (ignoré par git)
 └── output/               # Analyses PNG générées (ignoré par git)
 ```

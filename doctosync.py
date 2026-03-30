@@ -8,111 +8,30 @@ import os
 import sys
 from typing import Any, Optional
 
-import browser_cookie3
 import requests
-import yaml
 
-from cache_utils import _CACHE_FILE_DEFAULT, load_cache, save_cache
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from docto_common import (
+    _ANSI_BLUE,
+    _ANSI_GREEN,
+    _ANSI_RED,
+    _ANSI_RESET,
+    _CACHE_FILE_DEFAULT,
+    fetch_doctolib,
+    get_cookies,
+    load_cache,
+    load_yaml,
+    save_cache,
+)
+
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 _TIMEZONE = 'Europe/Paris'
-
-_ANSI_GREEN = '\033[92m'
-_ANSI_BLUE = '\033[94m'
-_ANSI_RED = '\033[91m'
-_ANSI_RESET = '\033[0m'
-
-
-def load_yaml(path: str) -> dict[str, Any]:
-    """Charge la configuration depuis un fichier YAML.
-
-    Args:
-        path: Chemin vers le fichier de configuration.
-
-    Returns:
-        Le contenu du fichier YAML sous forme de dictionnaire.
-
-    Raises:
-        SystemExit: Si le fichier est introuvable.
-    """
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
-    except FileNotFoundError:
-        sys.exit(f'Erreur: Fichier introuvable {path}')
-
-
-def get_cookies(path: str) -> Any:
-    """Charge les cookies Doctolib depuis le navigateur ou un fichier.
-
-    Tente d'abord une détection automatique via les navigateurs installés,
-    puis se rabat sur le fichier de cookies si nécessaire.
-
-    Args:
-        path: Chemin vers le fichier de cookies (format Netscape ou
-            clé=valeur).
-
-    Returns:
-        Un CookieJar si trouvé dans le navigateur, un dict de cookies si
-        chargé depuis le fichier, ou un dict vide si aucun cookie trouvé.
-    """
-    domain = '.doctolib.fr'
-    loaders = [
-        browser_cookie3.chrome,
-        browser_cookie3.firefox,
-        browser_cookie3.edge,
-        browser_cookie3.brave,
-        browser_cookie3.chromium,
-        browser_cookie3.safari,
-    ]
-
-    print(
-        f'{_ANSI_BLUE}Recherche automatique des cookies '
-        f'Doctolib...{_ANSI_RESET}'
-    )
-
-    for loader in loaders:
-        try:
-            cj = loader(domain_name=domain)
-            if cj and len(cj) > 0:
-                print(
-                    f'{_ANSI_GREEN}Cookies trouvés dans le navigateur '
-                    f'(via {loader.__name__}).{_ANSI_RESET}'
-                )
-                return cj
-        except Exception:  # noqa: BLE001 — erreurs navigateur ignorées
-            continue
-
-    print(
-        f'{_ANSI_RED}Aucun cookie trouvé automatiquement. '
-        f'Tentative via fichier...{_ANSI_RESET}'
-    )
-
-    if not os.path.exists(path):
-        return {}
-
-    with open(path, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    cookies: dict[str, str] = {}
-    if '\t' in content:  # Format Netscape (supposé si tabulations présentes).
-        for line in content.splitlines():
-            parts = line.strip().split('\t')
-            if len(parts) >= 7 and not line.startswith('#'):
-                cookies[parts[5]] = parts[6]
-    else:  # Format simple (clé=val; clé=val).
-        for pair in content.replace('; ', ';').split(';'):
-            if '=' in pair:
-                k, v = pair.split('=', 1)
-                cookies[k] = v
-    return cookies
-
 
 def get_calendar_service(config: dict[str, Any]) -> Any:
     """Authentifie l'utilisateur et retourne le service Google Calendar.
@@ -142,59 +61,6 @@ def get_calendar_service(config: dict[str, Any]) -> Any:
             token.write(creds.to_json())
 
     return build('calendar', 'v3', credentials=creds)
-
-
-def fetch_doctolib(
-        config: dict[str, Any],
-        start_date: str,
-        cookies: Any,
-) -> list[dict[str, Any]]:
-    """Récupère et nettoie les RDV Doctolib pour une semaine donnée.
-
-    Args:
-        config: Configuration contenant les paramètres de l'API Doctolib.
-        start_date: Date de début de la semaine au format 'YYYY-MM-DD'.
-        cookies: Cookies d'authentification Doctolib.
-
-    Returns:
-        Liste de RDV nettoyés, chacun sous forme de dictionnaire.
-
-    Raises:
-        requests.RequestException: En cas d'erreur réseau ou HTTP.
-    """
-    api = config['api']
-    start_dt = datetime.datetime.strptime(start_date, '%Y-%m-%d')
-    end_dt = start_dt + timedelta(days=7) - timedelta(seconds=1)
-
-    params = {
-        'agenda_ids': api['agenda_ids'],
-        'start_date': start_dt.strftime(api['date_format']),
-        'end_date': end_dt.strftime(api['date_format']),
-        'view': 'week',
-        'include_patients': 'true',
-    }
-
-    resp = requests.get(
-        api['url'],
-        params=params,
-        cookies=cookies,
-        headers={'User-Agent': api.get('user_agent', 'Mozilla/5.0')},
-        timeout=10,
-    )
-    resp.raise_for_status()
-
-    rdvs = []
-    for item in resp.json().get('data', []):
-        status = item.get('status', 'confirmed').lower()
-        rdvs.append({
-            'start': item.get('start_date'),
-            'end': item.get('end_date'),
-            'new_patient': item.get('new_patient', False),
-            'status': status,
-            'cancelled': status in ('deleted', 'no_show_but_ok'),
-            'created_at': item.get('created_at'),
-        })
-    return [r for r in rdvs if r['start'] and r['end']]
 
 
 def fetch_google_events(
@@ -243,8 +109,7 @@ def fetch_google_events(
 def _create_event_body(
         rdv: dict[str, Any],
         key: str,
-        notif_std: int,
-        notif_first: int,
+        notifs: tuple[int, int],
         last_day: Optional[str],
         loc: str,
 ) -> tuple[dict[str, Any], str]:
@@ -253,9 +118,8 @@ def _create_event_body(
     Args:
         rdv: Rendez-vous Doctolib nettoyé.
         key: Clé unique de synchronisation (SYNC_KEY).
-        notif_std: Délai de notification standard en minutes.
-        notif_first: Délai de notification pour le premier RDV du jour,
-            en minutes.
+        notifs: Tuple (notif_std, notif_first) — délais de notification en
+            minutes (standard, premier RDV du jour).
         last_day: Date du dernier RDV traité ('YYYY-MM-DD') ou None.
         loc: Adresse du lieu (peut être vide).
 
@@ -263,6 +127,7 @@ def _create_event_body(
         Un tuple (corps de l'événement, date du RDV courant au format
         'YYYY-MM-DD').
     """
+    notif_std, notif_first = notifs
     day = rdv['start'].split('T')[0]
     mins = notif_first if (day != last_day and notif_first > 0) else notif_std
 
@@ -323,7 +188,7 @@ def _print_sync_stats(
     )
 
 
-def sync_week(
+def sync_week(  # pylint: disable=too-many-locals
         service: Any,
         config: dict[str, Any],
         rdvs: list[dict[str, Any]],
@@ -356,7 +221,7 @@ def sync_week(
     for rdv in rdvs:
         key = f"{rdv['start']}|{rdv['end']}|{rdv['new_patient']}"
         body, last_day = _create_event_body(
-            rdv, key, notif_std, notif_first, last_day, loc
+            rdv, key, (notif_std, notif_first), last_day, loc
         )
 
         if key in existing_map:

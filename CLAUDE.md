@@ -63,3 +63,18 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+---
+
+## 5. Coding Guidelines
+
+**CRITICAL: All code MUST follow the [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html).**
+
+Key rules in practice:
+- 4-space indentation, 80-character line limit
+- Google-style docstrings with `Args:`, `Returns:`, `Raises:` sections
+- Type annotations on all public functions
+- Single quotes for strings
+- Imports grouped in order: stdlib → third-party → local, each group separated by a blank line
+
+Lint with `pylint` before submitting changes. If a `pylintrc` is present, use it; otherwise apply Google's default pylint configuration.
